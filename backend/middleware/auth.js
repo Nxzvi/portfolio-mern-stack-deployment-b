@@ -1,6 +1,8 @@
-import jwt from 'jsonwebtoken';
+'use strict';
 
-export function authMiddleware(req, res, next) {
+const jwt = require('jsonwebtoken');
+
+function authMiddleware(req, res, next) {
   const authHeader = req.headers['authorization'];
   if (!authHeader) {
     return res.status(401).json({ message: 'No authorization token provided' });
@@ -20,3 +22,5 @@ export function authMiddleware(req, res, next) {
     return res.status(401).json({ message: 'Invalid or expired token' });
   }
 }
+
+module.exports = { authMiddleware };

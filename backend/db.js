@@ -1,12 +1,8 @@
-import mongoose from 'mongoose';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
+'use strict';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_FILE_PATH = path.join(__dirname, 'data.json');
+const mongoose = require('mongoose');
 
+let isConnected = false;
 let isMockMode = false;
 
 // --- MONGOOSE SCHEMAS & MODELS ---
@@ -23,14 +19,14 @@ const adminSchema = new mongoose.Schema({
   roleText: String,
   experience: Array,
   certifications: Array,
-  education: Array
+  education: Array,
 });
 
 const skillSchema = new mongoose.Schema({
   name: { type: String, required: true },
   category: { type: String, required: true },
   icon: String,
-  level: String
+  level: String,
 });
 
 const projectSchema = new mongoose.Schema({
@@ -40,7 +36,7 @@ const projectSchema = new mongoose.Schema({
   githubUrl: String,
   liveUrl: String,
   category: String,
-  image: String
+  image: String,
 });
 
 const messageSchema = new mongoose.Schema({
@@ -49,231 +45,196 @@ const messageSchema = new mongoose.Schema({
   subject: String,
   message: { type: String, required: true },
   read: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
 });
 
-const Admin = mongoose.models.Admin || mongoose.model('Admin', adminSchema);
-const Skill = mongoose.models.Skill || mongoose.model('Skill', skillSchema);
+const Admin   = mongoose.models.Admin   || mongoose.model('Admin',   adminSchema);
+const Skill   = mongoose.models.Skill   || mongoose.model('Skill',   skillSchema);
 const Project = mongoose.models.Project || mongoose.model('Project', projectSchema);
 const Message = mongoose.models.Message || mongoose.model('Message', messageSchema);
 
-// --- JSON FALLBACK STORAGE HELPERS ---
-async function readJsonDb() {
-  try {
-    const data = await fs.readFile(DATA_FILE_PATH, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error('Error reading data.json, returning empty structure:', error);
-    return { admin: {}, skills: [], projects: [], messages: [] };
-  }
-}
+// Default in-memory seed data (used when MongoDB is unavailable)
+const inMemoryDb = {
+  admin: {
+    _id: 'mock-admin',
+    username: 'admin',
+    // bcrypt hash of "admin123" — change via AdminDashboard after deploying with MongoDB
+    password: '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lihO',
+    fullName: 'Nezvi Hussain',
+    email: 'nezvi@example.com',
+    roleText: 'Full Stack Developer',
+    aboutText: 'Passionate about building modern web applications.',
+    github: '',
+    linkedin: '',
+  },
+  skills: [],
+  projects: [],
+  messages: [],
+};
 
-async function writeJsonDb(data) {
-  try {
-    await fs.writeFile(DATA_FILE_PATH, JSON.stringify(data, null, 2), 'utf-8');
-  } catch (error) {
-    console.error('Error writing to data.json:', error);
-  }
-}
+// --- CONNECTION ---
+async function connectDatabase() {
+  if (isConnected) return;
 
-// --- MAIN DATABASE OPERATIONS ---
-export async function connectDatabase() {
-  const mongoUri = process.env.MONGODB_URI;
+  const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!mongoUri) {
-    console.log('⚠️ No MONGODB_URI found. Falling back to local JSON database.');
+    console.log('⚠️  No MONGODB_URI set — using in-memory fallback.');
     isMockMode = true;
     return;
   }
 
   try {
     mongoose.set('strictQuery', false);
-    await mongoose.connect(mongoUri);
-    console.log('✅ Connected to MongoDB successfully.');
-    
-    // Seed admin profile from data.json if MongoDB admin collection is empty
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
+    isConnected = true;
+    isMockMode = false;
+    console.log('✅ Connected to MongoDB.');
+
+    // Seed if empty
     const adminCount = await Admin.countDocuments();
     if (adminCount === 0) {
-      console.log('🌱 Seeding MongoDB from data.json...');
-      const seedData = await readJsonDb();
-      if (seedData.admin && seedData.admin.username) {
-        await Admin.create(seedData.admin);
-      }
-      if (seedData.skills && seedData.skills.length > 0) {
-        await Skill.insertMany(seedData.skills);
-      }
-      if (seedData.projects && seedData.projects.length > 0) {
-        await Project.insertMany(seedData.projects);
-      }
-      console.log('🌱 Database seeding completed.');
+      console.log('🌱 Seeding MongoDB from defaults...');
+      await Admin.create(inMemoryDb.admin);
     }
-  } catch (error) {
-    console.error('❌ MongoDB connection failed. Falling back to local JSON database.', error.message);
+  } catch (err) {
+    console.error('❌ MongoDB failed — using in-memory fallback.', err.message);
     isMockMode = true;
   }
 }
 
-export const db = {
+// Ensure DB is ready before any operation
+async function ensureConnected() {
+  if (!isConnected && !isMockMode) {
+    await connectDatabase();
+  }
+}
+
+// --- DATABASE OPERATIONS ---
+const db = {
   isMock: () => isMockMode,
 
-  // --- ADMIN / PROFILE ---
+  // ADMIN
   getAdmin: async () => {
+    await ensureConnected();
+    if (isMockMode) return inMemoryDb.admin;
+    return Admin.findOne();
+  },
+  updateAdmin: async (data) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      return data.admin || {};
+      inMemoryDb.admin = { ...inMemoryDb.admin, ...data };
+      return inMemoryDb.admin;
     }
-    return await Admin.findOne();
+    return Admin.findOneAndUpdate({}, data, { new: true, upsert: true });
   },
 
-  updateAdmin: async (adminData) => {
-    if (isMockMode) {
-      const data = await readJsonDb();
-      data.admin = { ...data.admin, ...adminData };
-      await writeJsonDb(data);
-      return data.admin;
-    }
-    return await Admin.findOneAndUpdate({}, adminData, { new: true, upsert: true });
-  },
-
-  // --- SKILLS ---
+  // SKILLS
   getSkills: async () => {
-    if (isMockMode) {
-      const data = await readJsonDb();
-      return data.skills || [];
-    }
-    return await Skill.find();
+    await ensureConnected();
+    if (isMockMode) return inMemoryDb.skills;
+    return Skill.find();
   },
-
-  createSkill: async (skillData) => {
+  createSkill: async (data) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const newSkill = { id: Date.now().toString(), ...skillData };
-      data.skills = data.skills || [];
-      data.skills.push(newSkill);
-      await writeJsonDb(data);
-      return newSkill;
+      const s = { id: Date.now().toString(), ...data };
+      inMemoryDb.skills.push(s);
+      return s;
     }
-    const skill = new Skill(skillData);
-    return await skill.save();
+    return new Skill(data).save();
   },
-
-  updateSkill: async (id, skillData) => {
+  updateSkill: async (id, data) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const index = data.skills.findIndex(s => (s.id || s._id) === id);
-      if (index === -1) return null;
-      data.skills[index] = { ...data.skills[index], ...skillData };
-      await writeJsonDb(data);
-      return data.skills[index];
+      const i = inMemoryDb.skills.findIndex(s => (s.id || s._id) === id);
+      if (i === -1) return null;
+      inMemoryDb.skills[i] = { ...inMemoryDb.skills[i], ...data };
+      return inMemoryDb.skills[i];
     }
-    return await Skill.findByIdAndUpdate(id, skillData, { new: true });
+    return Skill.findByIdAndUpdate(id, data, { new: true });
   },
-
   deleteSkill: async (id) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const lengthBefore = data.skills.length;
-      data.skills = data.skills.filter(s => (s.id || s._id) !== id);
-      await writeJsonDb(data);
-      return data.skills.length < lengthBefore;
+      const before = inMemoryDb.skills.length;
+      inMemoryDb.skills = inMemoryDb.skills.filter(s => (s.id || s._id) !== id);
+      return inMemoryDb.skills.length < before;
     }
-    const result = await Skill.findByIdAndDelete(id);
-    return result !== null;
+    return (await Skill.findByIdAndDelete(id)) !== null;
   },
 
-  // --- PROJECTS ---
+  // PROJECTS
   getProjects: async () => {
-    if (isMockMode) {
-      const data = await readJsonDb();
-      return data.projects || [];
-    }
-    return await Project.find();
+    await ensureConnected();
+    if (isMockMode) return inMemoryDb.projects;
+    return Project.find();
   },
-
-  createProject: async (projectData) => {
+  createProject: async (data) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const newProject = { id: Date.now().toString(), ...projectData };
-      data.projects = data.projects || [];
-      data.projects.push(newProject);
-      await writeJsonDb(data);
-      return newProject;
+      const p = { id: Date.now().toString(), ...data };
+      inMemoryDb.projects.push(p);
+      return p;
     }
-    const project = new Project(projectData);
-    return await project.save();
+    return new Project(data).save();
   },
-
-  updateProject: async (id, projectData) => {
+  updateProject: async (id, data) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const index = data.projects.findIndex(p => (p.id || p._id) === id);
-      if (index === -1) return null;
-      data.projects[index] = { ...data.projects[index], ...projectData };
-      await writeJsonDb(data);
-      return data.projects[index];
+      const i = inMemoryDb.projects.findIndex(p => (p.id || p._id) === id);
+      if (i === -1) return null;
+      inMemoryDb.projects[i] = { ...inMemoryDb.projects[i], ...data };
+      return inMemoryDb.projects[i];
     }
-    return await Project.findByIdAndUpdate(id, projectData, { new: true });
+    return Project.findByIdAndUpdate(id, data, { new: true });
   },
-
   deleteProject: async (id) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const lengthBefore = data.projects.length;
-      data.projects = data.projects.filter(p => (p.id || p._id) !== id);
-      await writeJsonDb(data);
-      return data.projects.length < lengthBefore;
+      const before = inMemoryDb.projects.length;
+      inMemoryDb.projects = inMemoryDb.projects.filter(p => (p.id || p._id) !== id);
+      return inMemoryDb.projects.length < before;
     }
-    const result = await Project.findByIdAndDelete(id);
-    return result !== null;
+    return (await Project.findByIdAndDelete(id)) !== null;
   },
 
-  // --- MESSAGES ---
+  // MESSAGES
   getMessages: async () => {
-    if (isMockMode) {
-      const data = await readJsonDb();
-      return data.messages || [];
-    }
-    return await Message.find().sort({ createdAt: -1 });
+    await ensureConnected();
+    if (isMockMode) return inMemoryDb.messages;
+    return Message.find().sort({ createdAt: -1 });
   },
-
-  createMessage: async (messageData) => {
+  createMessage: async (data) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const newMessage = { 
-        id: Date.now().toString(), 
-        ...messageData, 
-        read: false, 
-        createdAt: new Date().toISOString() 
-      };
-      data.messages = data.messages || [];
-      data.messages.push(newMessage);
-      await writeJsonDb(data);
-      return newMessage;
+      const m = { id: Date.now().toString(), ...data, read: false, createdAt: new Date().toISOString() };
+      inMemoryDb.messages.push(m);
+      return m;
     }
-    const message = new Message(messageData);
-    return await message.save();
+    return new Message(data).save();
   },
-
   markMessageRead: async (id) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const index = data.messages.findIndex(m => (m.id || m._id) === id);
-      if (index === -1) return null;
-      data.messages[index].read = true;
-      await writeJsonDb(data);
-      return data.messages[index];
+      const i = inMemoryDb.messages.findIndex(m => (m.id || m._id) === id);
+      if (i === -1) return null;
+      inMemoryDb.messages[i].read = true;
+      return inMemoryDb.messages[i];
     }
-    return await Message.findByIdAndUpdate(id, { read: true }, { new: true });
+    return Message.findByIdAndUpdate(id, { read: true }, { new: true });
   },
-
   deleteMessage: async (id) => {
+    await ensureConnected();
     if (isMockMode) {
-      const data = await readJsonDb();
-      const lengthBefore = data.messages.length;
-      data.messages = data.messages.filter(m => (m.id || m._id) !== id);
-      await writeJsonDb(data);
-      return data.messages.length < lengthBefore;
+      const before = inMemoryDb.messages.length;
+      inMemoryDb.messages = inMemoryDb.messages.filter(m => (m.id || m._id) !== id);
+      return inMemoryDb.messages.length < before;
     }
-    const result = await Message.findByIdAndDelete(id);
-    return result !== null;
-  }
+    return (await Message.findByIdAndDelete(id)) !== null;
+  },
 };
+
+module.exports = { connectDatabase, db };

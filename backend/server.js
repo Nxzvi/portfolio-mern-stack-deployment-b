@@ -1,70 +1,41 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import { connectDatabase, db } from './db.js';
-import router from './routes.js';
+'use strict';
+
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const { connectDatabase } = require('./db');
+const router = require('./routes');
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
-// Allowed origins for CORS
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://localhost:3000',
-  process.env.FRONTEND_URL,
-].filter(Boolean);
-
-// Middleware
+// CORS
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Vercel edge, etc.)
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, true); // permissive for portfolio; tighten if needed
-    }
-  },
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }));
 app.use(express.json());
 
-// Initialise DB and wire up routes
-let isReady = false;
-const initPromise = connectDatabase().then(() => {
-  isReady = true;
+// ── Wire up routes immediately so Vercel can find them ────────────────────────
+// DB connection is handled lazily inside each db.* call
+connectDatabase(); // fire-and-forget; idempotent — mongoose caches the connection
 
-  // Routes
-  app.use('/api', router);
+app.use('/api', router);
 
-  // Health check endpoint
-  app.get('/health', (req, res) => {
-    res.json({
-      status: 'OK',
-      database: db.isMock() ? 'Local JSON File DB Fallback' : 'MongoDB',
-    });
-  });
-}).catch(err => {
-  console.error('Failed to initialize database connection:', err);
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK' });
 });
 
-// ── Local dev: start the HTTP server only when run directly ──────────────────
-// Vercel imports this file as a module, so `process.argv[1]` check prevents
-// listen() from being called in the serverless environment.
-import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
-
-const __filename = fileURLToPath(import.meta.url);
-if (process.argv[1] === __filename) {
-  initPromise.then(() => {
-    app.listen(PORT, () => {
-      console.log(`🚀 Portfolio backend server running on port ${PORT}`);
-    });
+// ── Local dev: start the HTTP server only when run directly ───────────────────
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => {
+    console.log(`🚀 Portfolio backend running on port ${PORT}`);
   });
 }
 
 // Export for Vercel serverless runtime
-export default app;
+module.exports = app;
